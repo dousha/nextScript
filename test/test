@@ -1,0 +1,4 @@
+NOP
+UD2
+HLT
+PUSH 00facade
