@@ -25,8 +25,6 @@
 
 #define FN_PTR(name) void name (const string& l, const string& r)
 
-bool running = true;
-
 using namespace std;
 
 class UD2 : public exception { 
@@ -53,7 +51,7 @@ class SyntaxError : public exception {
 class IndexNotFound : public exception {
 	public:
 		const char* what() const noexcept{
-			return "[X] Cannot find the index.\n";
+			return "[X] Label not found.\n";
 		}
 };
 
@@ -253,17 +251,48 @@ void split(const string& s, char d, vector<string>& v, int count){
 		v.push_back(us.str());
 }
 
-template<typename T>
-T toNumber(const string& s){
-	stringstream ss;
-	T d;
-	ss << s;
-	ss >> d;
-	return d;
+int toDigit(const char c){
+	if('0' <= c && c <= '9'){
+		return c - 48;
+	}
+	else if(
+		('A' <= c && c <= 'Z') 
+		|| ('a' <= c && c <= 'z')){
+		return tolower(c) - 97;
+	}
+	else{
+		throw LogicImpossible();
+	}
 }
 
 string trim(const string& s){
 	return s.substr(s.find_first_not_of(' '), s.find_last_not_of(' ') + 1);
+}
+
+template<typename T>
+T toNumber(const string& s, bool isHex = false){
+	if(isHex){
+		// (0[xh])?.....
+		string u = trim(s);
+		int exp = 0;
+		T result = 0;
+		if(u[0] == '0'){
+			u = u.substr(2);
+		}
+		for(auto i = u.rbegin();
+			i < u.rend();
+			i++){
+			result += toDigit(*i) * (1 << (exp * 4));
+			++exp;
+		}
+		return result;
+	}else{
+		stringstream ss;
+		T d;
+		ss << s;
+		ss >> d;
+		return d;
+	}
 }
 
 string escape(const string& s){
@@ -289,6 +318,14 @@ string escape(const string& s){
 				case '\\':
 					escaped.push_back('\\');
 					break;
+				case 'x':
+					escaped.push_back(
+						(char) toNumber<int>(
+							s.substr(i + 2, i + 2), true
+						)
+					);
+					i += 2;
+					break;
 				// these cases below should trigger out a warning
 				case '\0':
 					escaped.push_back('\\');
@@ -310,6 +347,8 @@ string escape(const string& s){
 /// ^^^ helper fn ^^^
 /// vvv Environment vvv
 /// XXX: Use `class Environment` instead
+
+bool running = true;
 
 Register<Number<double> > ax; // XXX: we would use a register vector in the future
 Register<Number<size_t> > ip; // XXX: it's getting worse
@@ -533,12 +572,24 @@ void run_script(char* file){
 			}
 		}
 		catch(SyntaxError){
-			cerr << " At: " 
-				<< (size_t) *(ip.get_content()) 
-				<< ":" 
+			cerr << "At: " 
+				<< (size_t) *(ip.get_content()) + 1
+				<< ": " 
 				<< script.at((size_t) *(ip.get_content()))  
+				<< endl
+				<< "[X] Syntax error." 
 				<< endl;
-			throw; // yes, syntax error is fatal
+			exit(-1);
+		}
+		catch(IndexNotFound){
+			cerr << "At: "
+				<< (size_t) *(ip.get_content()) + 1
+				<< ": "
+				<< script.at((size_t) *(ip.get_content()))
+				<< endl
+				<< "[X] Label not found."
+				<< endl;
+			exit(-1);
 		}
 	}
 }
