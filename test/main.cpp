@@ -16,6 +16,8 @@
 #include <fstream>
 #include <string>
 #include <sstream>
+#include <stack>
+#include <map>
 #include <vector>
 #include <utility>
 #include <memory>
@@ -26,6 +28,8 @@
 #define FN_PTR(name) void name (const string& l, const string& r)
 
 using namespace std;
+
+using TablePtr = size_t;
 
 class UD2 : public exception { 
 	public: 
@@ -88,14 +92,24 @@ class Register{
 			_content->set(r);
 		}
 
+		template<typename N>
+		void set(const N& n){
+			_content->set(n);
+		}
+
 		// note that neither of these operations yield a result
 		// but they may throw exceptions (OperationNotDefined)
 		// register itself doesn't handle this exception, though
 		// if this exception occured, there must be sth wrong with
 		// this code
+		// maybe SFINAE can do some help
 
 		T* get_content(){
 			return _content.get();
+		}
+
+		T get(){
+			return _content->get();
 		}
 
 		void operator+(const Register& r){
@@ -181,32 +195,30 @@ template<typename I, typename V>
 class Table{
 	public:
 		Table(){
-			_content = make_unique< vector< pair<I, V> > >();
+			_content = make_unique< map<I, V> >();
 		}
 
 		~Table(){}
 
-		V get_by_index(const I& i){
-			V value;
-			for(auto p : *(_content)){
-				if(p.first == i){
-					value = p.second;
-					return value;
-				}
-			}
-			throw IndexNotFound();
+		V get(const I& i){
+			V v;
+			auto p = _content->find(i);
+			if(p == _content->end())
+				throw IndexNotFound();
+			v = p->second;
+			return v;
 		}
 
 		void put(const pair<I, V>& p){
-			_content->push_back(p);
+			_content->insert(p);
 		}
 
 		void put(const I& i, const V& v){
-			_content->push_back(pair<I, V>(i, v));
+			_content->insert(pair<I, V>(i, v));
 		}
 	
 	private:
-		unique_ptr< vector< pair<I, V> > > _content;
+		unique_ptr< map<I, V> > _content;
 };
 
 void get_op(shared_ptr<vector<instruction_t>> ins, 
@@ -222,6 +234,23 @@ void get_op(shared_ptr<vector<instruction_t>> ins,
 }
 
 /// ^^^ type def ^^^
+/// vvv Environment vvv
+/// XXX: Use `class Environment` instead
+
+bool running = true;
+
+/// NOTE: now registers can be get with get_reg(const string&) function
+Register<Number<double> > ax; // XXX: we would use a register vector in the future
+Register<Number<size_t> > ip; // XXX: it's getting worse
+Register<Number<size_t> > bp; // XXX: template classes is hard to be stroed
+Register<Number<size_t> > sp; // XXX: =_=
+
+Table<string, size_t> fns; // XXX: i believe it's not working
+
+stack<size_t> sys_stk; // XXX: :-|
+stack<TablePtr> param_stk; // XXX: i promise i will use a env class next time
+
+/// ^^^ Environment ^^^
 /// vvv helper fn vvvv
 
 void split(const string& s, char d, vector<string>& v){
@@ -319,9 +348,10 @@ string escape(const string& s){
 					escaped.push_back('\\');
 					break;
 				case 'x':
+					// DBG
 					escaped.push_back(
 						(char) toNumber<int>(
-							s.substr(i + 2, i + 2), true
+							s.substr(i + 2, 2), true
 						)
 					);
 					i += 2;
@@ -344,19 +374,16 @@ string escape(const string& s){
 	return escaped;
 }
 
+void* get_reg(const string& s){
+	if(s.empty()) return nullptr;
+	else if(s == "ax") return (void*) &ax;
+	else if(s == "ip") return (void*) &ip;
+	else if(s == "bp") return (void*) &bp;
+	else if(s == "sp") return (void*) &sp;
+	else throw LogicImpossible();
+}
+
 /// ^^^ helper fn ^^^
-/// vvv Environment vvv
-/// XXX: Use `class Environment` instead
-
-bool running = true;
-
-Register<Number<double> > ax; // XXX: we would use a register vector in the future
-Register<Number<size_t> > ip; // XXX: it's getting worse
-
-Table<string, size_t> fns; // XXX: i believe it's not working
-
-/// ^^^ Environment ^^^
-
 /// vvv functions vvv
 
 FN_PTR(nop){
@@ -407,11 +434,38 @@ FN_PTR(div){
 }
 
 FN_PTR(push){
-
+	// PUSH reg
+	// PUSH imm
+	// Register content is treated as TablePtr (aka size_t)
+	if(trim(l)[0] == '%'){
+		param_stk.push(
+			(
+				(Register< Number<size_t> >*)
+				get_reg(trim(l).substr(1))
+			)->get());
+		sp.set<size_t>((size_t) sp.get());
+	}
+	else if(trim(l)[0] == '$'){
+		param_stk.push(toNumber<size_t>(trim(l).substr(1)));
+	}
+	else{
+		throw SyntaxError();
+	}
 }
 
 FN_PTR(pop){
-
+	// POP reg
+	// Register content is treated as TablePtr (aka size_t)
+	// `ip` can be changed
+	if(trim(l)[0] == '%'){
+		((Register< Number<size_t> >*) 
+			get_reg(trim(l).substr(1)))->set(param_stk.top());
+		param_stk.pop();
+		sp.set<size_t>((size_t) sp.get());
+	}
+	else{
+		throw SyntaxError();
+	}
 }
 
 FN_PTR(hlt){
@@ -424,16 +478,17 @@ FN_PTR(print){
 	// PRINT $str
 	// PRINT %reg
 	// PRINT @ptr
-	switch(l[0]){
+	switch(trim(l)[0]){
 		case '%':
 			// register
 			// PRINT %ax => value of ax register
 			// XXX: use tuple or map instead of this
-			if(l.substr(1) == "ax"){
+			if(trim(l).substr(1) == "ax"){
 				cout << (double) *(ax.get_content());
 			}
 			else{
-				throw SyntaxError();
+				cout << ((Register< Number<size_t> >*)
+				get_reg(trim(l).substr(1)))->get();
 			}
 			break;
 		case '$':
@@ -458,8 +513,8 @@ FN_PTR(jmp){
 	// `r` is call sign
 	if(trim(l) == "NEAR"){
 		// "NEAR" means in the same file
-		ip.get_content()->set(
-			fns.get_by_index(trim(r))
+		ip.set<size_t>(
+			fns.get(trim(r))
 			);
 	}
 	else if(trim(l) == "FAR"){
@@ -473,11 +528,35 @@ FN_PTR(jmp){
 }
 
 FN_PTR(call){
-
+	// CALL (NEAR|FAR) label
+	if(trim(l) == "NEAR"){
+		sys_stk.push((size_t) ip.get());
+		sys_stk.push((size_t) bp.get());
+		bp.set<size_t>((size_t) sp.get());
+		ip.set<size_t>(fns.get(trim(r)));
+	}
+	else if(trim(l) == "FAR"){
+		// TODO
+	}
+	else{
+		throw SyntaxError();
+	}
 }
 
 FN_PTR(ret){
-	
+	// RET
+	// Return from a call
+	// if the stack is empty, treated as HLT
+	// note you can change `ip` by manipulating stack
+	// be careful when doing this
+	if(sys_stk.empty()){
+		hlt("", "");
+		return;
+	}
+	bp.set<size_t>(sys_stk.top());
+	sys_stk.pop();
+	ip.set<size_t>(sys_stk.top());
+	sys_stk.pop();
 }
 
 /// ^^^ functions ^^^
@@ -507,7 +586,7 @@ void run_script(char* file){
 	fn_init(ins);
 	instruction_t* curIns = nullptr;
 	ax.get_content()->set((double) 0.0);
-	ip.get_content()->set((size_t) 0);
+	ip.set<size_t>((size_t) 0);
 
 	// first scan
 	while(f.good() && !f.eof()){
@@ -520,18 +599,18 @@ void run_script(char* file){
 			}
 		}
 		script.push_back(s);
-		ip.get_content()->set(ip.get_content()->get() + 1); // maybe should be done more gracefully
+		ip.set<size_t>((size_t) ip.get() + 1); // maybe should be done more gracefully
 	}
 
 	f.close();
 
 	// second run
-	for(ip.get_content()->set((size_t) 0);
-		ip.get_content()->get() < script.size();
-		ip.get_content()->set(ip.get_content()->get() + 1)
+	for(ip.set<size_t>((size_t) 0);
+		(size_t) ip.get() < script.size();
+		ip.set<size_t>((size_t) ip.get() + 1)
 		){
 		if(!running) break;
-		s = script.at(ip.get_content()->get());
+		s = script.at((size_t) ip.get());
 		if(s.empty()){
 			continue;
 		}
